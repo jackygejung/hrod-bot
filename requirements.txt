@@ -1,6 +1,6 @@
 flask==3.0.3
 line-bot-sdk==3.12.0
-google-generativeai==0.8.3
+google-genai
 gunicorn==22.0.0
 requests==2.32.3
 pypdf==4.3.1
