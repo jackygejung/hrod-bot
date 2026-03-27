@@ -11,12 +11,12 @@ from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent, ImageMessageContent, FileMessageContent
 )
 from linebot.v3.exceptions import InvalidSignatureError
-from groq import Groq
+import google.generativeai as genai
 
 app = Flask(__name__)
 configuration = Configuration(access_token=os.environ['LINE_CHANNEL_ACCESS_TOKEN'])
 handler = WebhookHandler(os.environ['LINE_CHANNEL_SECRET'])
-groq_client = Groq(api_key=os.environ['GROQ_API_KEY'])
+genai.configure(api_key=os.environ['GEMINI_API_KEY'])
 
 # Chat history: {room_id: deque of "Name: text"}
 chat_history = defaultdict(lambda: deque(maxlen=50))
@@ -96,15 +96,12 @@ def handle_text(event):
                     f"สรุปการสนทนาต่อไปนี้เป็นภาษาไทย "
                     f"ระบุชื่อผู้พูดด้วย กระชับและได้ใจความ:\n\n{history_text}"
                 )
-                resp = groq_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "คุณคือ HROD BOT สรุปการสนทนาเป็นภาษาไทย ระบุชื่อผู้พูดด้วย"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model="llama-3.3-70b-versatile",
-                    max_tokens=600,
+                model = genai.GenerativeModel(
+                    'gemini-2.0-flash',
+                    system_instruction="คุณคือ HROD BOT สรุปการสนทนาเป็นภาษาไทย ระบุชื่อผู้พูดด้วย"
                 )
-                reply_text = "📋 สรุปการสนทนา:\n\n" + resp.choices[0].message.content
+                response = model.generate_content(prompt)
+                reply_text = "📋 สรุปการสนทนา:\n\n" + response.text
 
         # Analyze last image in detail
         elif command in ['ดูรูป', 'วิเคราะห์รูป', 'อ่านรูป', 'รูปล่าสุด', 'ดูรูปล่าสุด']:
@@ -112,24 +109,16 @@ def handle_text(event):
                 reply_text = "ยังไม่มีรูปที่ฉันจำได้ครับ ลองส่งรูปมาแล้วถามอีกครั้งนะครับ 😊"
             else:
                 img = last_images[room_id]
-                resp = groq_client.chat.completions.create(
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{img['base64']}"}
-                            },
-                            {
-                                "type": "text",
-                                "text": f"วิเคราะห์และอธิบายรูปนี้อย่างละเอียดเป็นภาษาไทย รูปส่งโดย {img['sender']}"
-                            }
-                        ]
-                    }],
-                    model="llama-3.2-11b-vision-preview",
-                    max_tokens=600,
-                )
-                reply_text = f"🖼️ วิเคราะห์รูปจาก {img['sender']}:\n\n" + resp.choices[0].message.content
+                image_data = {
+                    "mime_type": "image/jpeg",
+                    "data": img['base64']
+                }
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                response = model.generate_content([
+                    image_data,
+                    f"วิเคราะห์และอธิบายรูปนี้อย่างละเอียดเป็นภาษาไทย รูปส่งโดย {img['sender']}"
+                ])
+                reply_text = f"🖼️ วิเคราะห์รูปจาก {img['sender']}:\n\n" + response.text
 
         # General question with context awareness
         else:
@@ -143,23 +132,17 @@ def handle_text(event):
             if recent:
                 context_str = "บริบทการสนทนาล่าสุด:\n" + "\n".join(f"  {m}" for m in recent) + "\n\n"
 
-            resp = groq_client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            f"คุณคือ HROD BOT ผู้ช่วย AI ที่ฉลาดและเป็นมิตร "
-                            f"ตอบเป็นภาษาไทยเสมอ กระชับ ชัดเจน สนุกสนาน "
-                            f"ผู้ถามชื่อ {user_name} "
-                            f"ถ้ามีบริบทการสนทนาให้นำมาประกอบการตอบด้วย"
-                        )
-                    },
-                    {"role": "user", "content": context_str + question}
-                ],
-                model="llama-3.3-70b-versatile",
-                max_tokens=500,
+            model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                system_instruction=(
+                    f"คุณคือ HROD BOT ผู้ช่วย AI ที่ฉลาดและเป็นมิตร "
+                    f"ตอบเป็นภาษาไทยเสมอ กระชับ ชัดเจน สนุกสนาน "
+                    f"ผู้ถามชื่อ {user_name} "
+                    f"ถ้ามีบริบทการสนทนาให้นำมาประกอบการตอบด้วย"
+                )
             )
-            reply_text = resp.choices[0].message.content
+            response = model.generate_content(context_str + question)
+            reply_text = response.text
 
         send_reply(api_client, event.reply_token, reply_text)
 
@@ -180,25 +163,13 @@ def handle_image(event):
         chat_history[room_id].append(f"{user_name}: [ส่งรูปภาพ]")
 
         # Auto-describe the image briefly
-        resp = groq_client.chat.completions.create(
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                    },
-                    {
-                        "type": "text",
-                        "text": "อธิบายรูปภาพนี้สั้นๆ 1-2 ประโยค เป็นภาษาไทย"
-                    }
-                ]
-            }],
-            model="llama-3.2-11b-vision-preview",
-            max_tokens=200,
-        )
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        response = model.generate_content([
+            {"mime_type": "image/jpeg", "data": image_base64},
+            "อธิบายรูปภาพนี้สั้นๆ 1-2 ประโยค เป็นภาษาไทย"
+        ])
 
-        desc = resp.choices[0].message.content
+        desc = response.text
         reply_text = (
             f"🖼️ {user_name} ส่งรูป: {desc}\n\n"
             f"(พิมพ์ 'AI วิเคราะห์รูป' เพื่อดูรายละเอียดเพิ่มเติม)"
@@ -225,23 +196,16 @@ def handle_file(event):
             if len(text_content) > 3000:
                 text_content = text_content[:3000] + "...(ตัดทอน)"
 
-            resp = groq_client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "คุณคือ HROD BOT สรุปและวิเคราะห์เนื้อหาไฟล์เป็นภาษาไทย"
-                    },
-                    {
-                        "role": "user",
-                        "content": f"สรุปเนื้อหาของไฟล์ '{file_name}':\n\n{text_content}"
-                    }
-                ],
-                model="llama-3.3-70b-versatile",
-                max_tokens=500,
+            model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                system_instruction="คุณคือ HROD BOT สรุปและวิเคราะห์เนื้อหาไฟล์เป็นภาษาไทย"
+            )
+            response = model.generate_content(
+                f"สรุปเนื้อหาของไฟล์ '{file_name}':\n\n{text_content}"
             )
             reply_text = (
                 f"📄 ไฟล์จาก {user_name} ({file_name}):\n\n"
-                + resp.choices[0].message.content
+                + response.text
             )
         except UnicodeDecodeError:
             reply_text = (
