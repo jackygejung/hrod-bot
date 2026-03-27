@@ -28,6 +28,13 @@ def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text
+        # ตรวจสอบ trigger: ต้องขึ้นต้นด้วย "AI" หรือ "ai"
+        if not user_text.lower().startswith('ai'):
+                    return
+                # ตัด "AI " ออก เหลือแค่คำถามจริงๆ
+    user_text = user_text[2:].strip()
+    if not user_text:
+                user_text = "สวัสดี ช่วยอะไรได้บ้าง?"
 
     # ส่งข้อความให้ Groq AI ตอบ
     response = groq_client.chat.completions.create(
