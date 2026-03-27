@@ -71,13 +71,15 @@ def send_reply(api_client, reply_token, text):
 
 def gemini_text(prompt, use_search=False):
     try:
-        tools = []
         if use_search:
-            tools = [genai.Tool(google_search_retrieval=genai.GoogleSearchRetrieval())]
-        model = genai.GenerativeModel('gemini-3-flash-preview', tools=tools if tools else None)
+            model = genai.GenerativeModel(
+                model_name='gemini-3-flash-preview',
+                tools='google_search_retrieval'
+            )
+        else:
+            model = genai.GenerativeModel('gemini-3-flash-preview')
         response = model.generate_content(prompt)
         text = response.text if response.text else "ขออภัยครับ ตอบไม่ได้"
-        # Append search sources if available
         if use_search and hasattr(response, 'candidates') and response.candidates:
             grounding = getattr(response.candidates[0], 'grounding_metadata', None)
             if grounding and hasattr(grounding, 'web_search_queries') and grounding.web_search_queries:
