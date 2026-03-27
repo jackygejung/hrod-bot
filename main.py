@@ -65,7 +65,7 @@ def send_reply(api_client, reply_token, text):
 
 def gemini_text(prompt):
     try:
-        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+        model = genai.GenerativeModel('gemini-3-flash-preview')
         response = model.generate_content(prompt)
         return response.text if response.text else "ขออภัยครับ ตอบไม่ได้"
     except Exception as e:
@@ -74,7 +74,7 @@ def gemini_text(prompt):
 
 def gemini_vision(image_base64, prompt):
     try:
-        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+        model = genai.GenerativeModel('gemini-3-flash-preview')
         image_data = base64.b64decode(image_base64)
         response = model.generate_content([
             prompt,
