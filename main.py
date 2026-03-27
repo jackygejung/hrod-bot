@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict, deque
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
@@ -15,6 +16,9 @@ handler = WebhookHandler(os.environ['LINE_CHANNEL_SECRET'])
 # Groq setup
 groq_client = Groq(api_key=os.environ['GROQ_API_KEY'])
 
+# เก็บประวัติแชทแต่ละกลุ่ม/แชท (50 ข้อความล่าสุด)
+chat_history = defaultdict(lambda: deque(maxlen=50))
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -29,33 +33,61 @@ def callback():
 def handle_message(event):
     user_text = event.message.text
 
-    # ตรวจสอบ trigger: ต้องขึ้นต้นด้วย "AI" หรือ "ai"
+    # ระบุห้องแชท (กลุ่ม หรือ DM)
+    if hasattr(event.source, 'group_id'):
+        room_id = event.source.group_id
+    elif hasattr(event.source, 'room_id'):
+        room_id = event.source.room_id
+    else:
+        room_id = event.source.user_id
+
+    # เก็บทุกข้อความเข้า history (ยกเว้นคำสั่ง AI)
     if not user_text.lower().startswith('ai'):
-        return
+        chat_history[room_id].append(user_text)
+        return  # ไม่ตอบถ้าไม่มี trigger
 
-    # ตัด "AI " ออก เหลือแค่คำถามจริงๆ
-    user_text = user_text[2:].strip()
-    if not user_text:
-        user_text = "สวัสดี ช่วยอะไรได้บ้าง?"
+    # --- มี trigger "AI" ---
+    command = user_text[2:].strip().lower()
 
-    # ส่งข้อความให้ Groq AI ตอบ
-    response = groq_client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "คุณคือ HROD BOT ผู้ช่วย AI ที่ฉลาดและเป็นมิตร "
-                    "ตอบเป็นภาษาไทยเสมอ ตอบกระชับ ชัดเจน และสนุกสนาน "
-                    "ถ้าถามเรื่องทั่วไปก็ตอบได้เลย"
-                )
-            },
-            {"role": "user", "content": user_text}
-        ],
-        model="llama-3.3-70b-versatile",
-        max_tokens=500,
-    )
+    # คำสั่งสรุปแชท
+    if command in ['สรุปแชท', 'สรุป', 'สรุปการสนทนา', 'summarize', 'summary']:
+        messages = list(chat_history[room_id])
+        if not messages:
+            reply_text = "ยังไม่มีข้อความในกลุ่มที่ฉันจำได้เลยนะครับ 😅"
+        else:
+            history_text = '\n'.join(f"- {m}" for m in messages)
+            prompt = f"สรุปการสนทนาต่อไปนี้เป็นภาษาไทย กระชับและได้ใจความ:\n\n{history_text}"
+            response = groq_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "คุณคือ HROD BOT ผู้ช่วย AI สรุปการสนทนาเป็นภาษาไทยให้กระชับและได้ใจความ"},
+                    {"role": "user", "content": prompt}
+                ],
+                model="llama-3.3-70b-versatile",
+                max_tokens=600,
+            )
+            reply_text = "📋 สรุปการสนทนา:\n\n" + response.choices[0].message.content
+    else:
+        # คำถามทั่วไป
+        question = user_text[2:].strip()
+        if not question:
+            question = "สวัสดี ช่วยอะไรได้บ้าง?"
 
-    reply_text = response.choices[0].message.content
+        response = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "คุณคือ HROD BOT ผู้ช่วย AI ที่ฉลาดและเป็นมิตร "
+                        "ตอบเป็นภาษาไทยเสมอ ตอบกระชับ ชัดเจน และสนุกสนาน "
+                        "ถ้าถามเรื่องทั่วไปก็ตอบได้เลย"
+                    )
+                },
+                {"role": "user", "content": question}
+            ],
+            model="llama-3.3-70b-versatile",
+            max_tokens=500,
+        )
+        reply_text = response.choices[0].message.content
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
