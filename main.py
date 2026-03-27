@@ -14,6 +14,12 @@ from linebot.v3.webhooks import (
 )
 from linebot.v3.exceptions import InvalidSignatureError
 import google.generativeai as genai
+import io
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
 
 app = Flask(__name__)
 configuration = Configuration(access_token=os.environ['LINE_CHANNEL_ACCESS_TOKEN'])
@@ -284,16 +290,45 @@ def handle_file(event):
         blob_api = MessagingApiBlob(api_client)
         file_bytes = blob_api.get_message_content(event.message.id)
         chat_history[room_id].append(f"{user_name}: [ส่งไฟล์: {file_name}]")
-        try:
-            text_content = file_bytes.decode('utf-8')
-            if len(text_content) > 3000:
-                text_content = text_content[:3000] + "...(ตัดทอน)"
-            prompt = f"สรุปเนื้อหาของไฟล์ '{file_name}':\n\n{text_content}"
-            summary = gemini_text(prompt)
-            reply_text = f"ไฟล์จาก {user_name} ({file_name}):\n\n" + summary
-        except UnicodeDecodeError:
-            reply_text = (f"{user_name} ส่งไฟล์: {file_name}\n"
-                         f"ไฟล์ประเภทนี้ยังอ่านไม่ได้ครับ ลองส่งเป็น .txt นะครับ")
+
+        # --- PDF ---
+        if file_name.lower().endswith('.pdf'):
+            if not HAS_PYPDF:
+                reply_text = (f"{user_name} ส่ง PDF: {file_name}\n"
+                             f"ยังไม่ได้ติดตั้ง pypdf ครับ กรุณาเพิ่ม pypdf ใน requirements.txt")
+            else:
+                try:
+                    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+                    pages = len(reader.pages)
+                    text_content = ""
+                    for page in reader.pages:
+                        text_content += page.extract_text() or ""
+                        if len(text_content) > 4000:
+                            text_content = text_content[:4000] + "...(ตัดทอน)"
+                            break
+                    if not text_content.strip():
+                        reply_text = (f"PDF จาก {user_name} ({file_name}, {pages} หน้า)\n"
+                                     f"ไม่สามารถดึงข้อความได้ครับ อาจเป็น PDF รูปภาพ")
+                    else:
+                        prompt = f"สรุปเนื้อหาของ PDF '{file_name}' ({pages} หน้า) เป็นภาษาไทย กระชับและได้ใจความ:\n\n{text_content}"
+                        summary = gemini_text(prompt)
+                        reply_text = f"PDF จาก {user_name} ({file_name}, {pages} หน้า):\n\n" + summary
+                except Exception as e:
+                    reply_text = f"อ่าน PDF ไม่ได้ครับ: {str(e)}"
+
+        # --- Text files ---
+        else:
+            try:
+                text_content = file_bytes.decode('utf-8')
+                if len(text_content) > 3000:
+                    text_content = text_content[:3000] + "...(ตัดทอน)"
+                prompt = f"สรุปเนื้อหาของไฟล์ '{file_name}':\n\n{text_content}"
+                summary = gemini_text(prompt)
+                reply_text = f"ไฟล์จาก {user_name} ({file_name}):\n\n" + summary
+            except UnicodeDecodeError:
+                reply_text = (f"{user_name} ส่งไฟล์: {file_name}\n"
+                             f"ไฟล์ประเภทนี้ยังอ่านไม่ได้ครับ ลองส่งเป็น .txt หรือ .pdf นะครับ")
+
         send_reply(api_client, event.reply_token, reply_text)
 
 
