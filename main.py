@@ -72,7 +72,7 @@ def send_reply(api_client, reply_token, text):
 def gemini_text(prompt, use_search=False):
     try:
         tools = [types.Tool(google_search=types.GoogleSearch())] if use_search else []
-        config = types.GenerateContentConfig(tools=tools) if tools else None
+        config = types.GenerateContentConfig(tools=tools if tools else [], thinking_config=types.ThinkingConfig(thinking_level="high"))
         response = client.models.generate_content(
             model=MODEL,
             contents=prompt,
