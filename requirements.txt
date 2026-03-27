@@ -1,4 +1,4 @@
 flask==3.0.3
 line-bot-sdk==3.12.0
-groq==0.11.0
+groq==0.13.0
 gunicorn==22.0.0
