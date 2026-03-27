@@ -69,11 +69,21 @@ def send_reply(api_client, reply_token, text):
     )
 
 
-def gemini_text(prompt):
+def gemini_text(prompt, use_search=False):
     try:
-        model = genai.GenerativeModel('gemini-3-flash-preview')
+        tools = []
+        if use_search:
+            tools = [genai.Tool(google_search_retrieval=genai.GoogleSearchRetrieval())]
+        model = genai.GenerativeModel('gemini-3-flash-preview', tools=tools if tools else None)
         response = model.generate_content(prompt)
-        return response.text if response.text else "ขออภัยครับ ตอบไม่ได้"
+        text = response.text if response.text else "ขออภัยครับ ตอบไม่ได้"
+        # Append search sources if available
+        if use_search and hasattr(response, 'candidates') and response.candidates:
+            grounding = getattr(response.candidates[0], 'grounding_metadata', None)
+            if grounding and hasattr(grounding, 'web_search_queries') and grounding.web_search_queries:
+                queries = ", ".join(grounding.web_search_queries[:3])
+                text += f"\n\n🔍 ค้นหา: {queries}"
+        return text
     except Exception as e:
         return f"ข้อผิดพลาด: {str(e)}"
 
@@ -235,6 +245,18 @@ def handle_text(event):
                 prompt = f"สรุปการสนทนาต่อไปนี้เป็นภาษาไทย ระบุชื่อผู้พูดด้วย กระชับและได้ใจความ:\n\n{history_text}"
                 reply_text = "สรุปการสนทนา:\n\n" + gemini_text(prompt)
 
+        elif (cmd_lower.startswith('ค้นหา ') or cmd_lower.startswith('search ') or
+              cmd_lower.startswith('หา ') or cmd_lower.startswith('เสิร์ช ')):
+            for prefix in ['ค้นหา ', 'search ', 'หา ', 'เสิร์ช ']:
+                if cmd_lower.startswith(prefix):
+                    query = command[len(prefix):].strip()
+                    break
+            if not query:
+                reply_text = "จะให้ค้นหาอะไรครับ? เช่น: AI ค้นหา ราคาทองวันนี้"
+            else:
+                prompt = f"ค้นหาและสรุปข้อมูลเกี่ยวกับ '{query}' เป็นภาษาไทย กระชับและได้ใจความ"
+                reply_text = "🔍 " + gemini_text(prompt, use_search=True)
+
         elif cmd_lower in ['ดูรูป', 'วิเคราะห์รูป', 'อ่านรูป', 'รูปล่าสุด', 'ดูรูปล่าสุด']:
             if room_id not in last_images:
                 reply_text = "ยังไม่มีรูปที่ฉันจำได้ครับ ลองส่งรูปมาแล้วถามอีกครั้ง"
@@ -254,13 +276,16 @@ def handle_text(event):
                 mem_lines = get_memory_lines(room_id)
                 if mem_lines:
                     mem_str = "โน๊ตของกลุ่มนี้:\n" + "\n".join(mem_lines[-10:]) + "\n\n"
+            # ใช้ search ถ้าคำถามเกี่ยวกับข่าว/ข้อมูลปัจจุบัน
+            news_keywords = ['ข่าว', 'วันนี้', 'ล่าสุด', 'ตอนนี้', 'ราคา', 'พยากรณ์', 'อากาศ', 'หุ้น', 'news', 'today', 'latest', 'price']
+            use_search = any(kw in question.lower() for kw in news_keywords)
             full_prompt = (
                 f"คุณคือ HROD BOT ผู้ช่วย AI ที่ฉลาดและเป็นมิตร ตอบเป็นภาษาไทยเสมอ "
                 f"กระชับ ชัดเจน สนุกสนาน ผู้ถามชื่อ {user_name} "
                 f"ถ้ามีบริบทหรือโน๊ตของกลุ่มให้นำมาประกอบการตอบด้วย\n\n"
                 f"{mem_str}{context_str}{question}"
             )
-            reply_text = gemini_text(full_prompt)
+            reply_text = gemini_text(full_prompt, use_search=use_search)
 
         send_reply(api_client, event.reply_token, reply_text)
 
