@@ -13,7 +13,8 @@ from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent, ImageMessageContent, FileMessageContent
 )
 from linebot.v3.exceptions import InvalidSignatureError
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import io
 try:
     import pypdf
@@ -24,9 +25,10 @@ except ImportError:
 app = Flask(__name__)
 configuration = Configuration(access_token=os.environ['LINE_CHANNEL_ACCESS_TOKEN'])
 handler = WebhookHandler(os.environ['LINE_CHANNEL_SECRET'])
-genai.configure(api_key=os.environ['GEMINI_API_KEY'])
+client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 GITHUB_REPO = 'jackygejung/hrod-bot'
+MODEL = 'gemini-3-flash-preview'
 
 chat_history = defaultdict(lambda: deque(maxlen=50))
 last_images = {}
@@ -47,11 +49,9 @@ def get_user_name(event, api_client):
         line_bot_api = MessagingApi(api_client)
         user_id = event.source.user_id
         if hasattr(event.source, 'group_id'):
-            profile = line_bot_api.get_group_member_profile(
-                event.source.group_id, user_id)
+            profile = line_bot_api.get_group_member_profile(event.source.group_id, user_id)
         elif hasattr(event.source, 'room_id'):
-            profile = line_bot_api.get_room_member_profile(
-                event.source.room_id, user_id)
+            profile = line_bot_api.get_room_member_profile(event.source.room_id, user_id)
         else:
             profile = line_bot_api.get_profile(user_id)
         return profile.display_name
@@ -71,16 +71,15 @@ def send_reply(api_client, reply_token, text):
 
 def gemini_text(prompt, use_search=False):
     try:
-        if use_search:
-            model = genai.GenerativeModel(
-                model_name='gemini-3-flash-preview',
-                tools=[{'google_search': {}}]
-            )
-        else:
-            model = genai.GenerativeModel('gemini-3-flash-preview')
-        response = model.generate_content(prompt)
+        tools = [types.Tool(google_search=types.ToolGoogleSearch())] if use_search else []
+        config = types.GenerateContentConfig(tools=tools) if tools else None
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=config
+        )
         text = response.text if response.text else "ขออภัยครับ ตอบไม่ได้"
-        if use_search and hasattr(response, 'candidates') and response.candidates:
+        if use_search and response.candidates:
             grounding = getattr(response.candidates[0], 'grounding_metadata', None)
             if grounding and hasattr(grounding, 'web_search_queries') and grounding.web_search_queries:
                 queries = ", ".join(grounding.web_search_queries[:3])
@@ -92,12 +91,14 @@ def gemini_text(prompt, use_search=False):
 
 def gemini_vision(image_base64, prompt):
     try:
-        model = genai.GenerativeModel('gemini-3-flash-preview')
         image_data = base64.b64decode(image_base64)
-        response = model.generate_content([
-            prompt,
-            {"mime_type": "image/jpeg", "data": image_data}
-        ])
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=[
+                types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
+                prompt
+            ]
+        )
         return response.text if response.text else "ดูรูปไม่ได้ครับ"
     except Exception as e:
         return f"ข้อผิดพลาด: {str(e)}"
@@ -213,11 +214,11 @@ def handle_text(event):
             if not note:
                 reply_text = "จะให้จำว่าอะไรครับ? เช่น: AI จำว่า ประชุมทุกวันจันทร์ 9 โมง"
             elif not GITHUB_TOKEN:
-                reply_text = "ยังไม่ได้ตั้งค่า GITHUB_TOKEN ครับ กรุณาเพิ่มใน Railway"
+                reply_text = "ยังไม่ได้ตั้งค่า GITHUB_TOKEN ครับ"
             else:
                 ok = add_memory_entry(room_id, user_name, note)
                 reply_text = (f"จำแล้วครับ!\n\n{note}\n\n(พิมพ์ AI ดูโน๊ต เพื่อดูทั้งหมด)"
-                              if ok else "บันทึกไม่สำเร็จครับ ลองอีกครั้งนะครับ")
+                              if ok else "บันทึกไม่สำเร็จครับ")
 
         elif cmd_lower in ['ความจำ', 'จำอะไรบ้าง', 'โน๊ต', 'ดูโน๊ต',
                            'บันทึก', 'ดูบันทึก', 'ดูความจำ', 'memory', 'note']:
@@ -249,6 +250,7 @@ def handle_text(event):
 
         elif (cmd_lower.startswith('ค้นหา ') or cmd_lower.startswith('search ') or
               cmd_lower.startswith('หา ') or cmd_lower.startswith('เสิร์ช ')):
+            query = ""
             for prefix in ['ค้นหา ', 'search ', 'หา ', 'เสิร์ช ']:
                 if cmd_lower.startswith(prefix):
                     query = command[len(prefix):].strip()
@@ -278,7 +280,6 @@ def handle_text(event):
                 mem_lines = get_memory_lines(room_id)
                 if mem_lines:
                     mem_str = "โน๊ตของกลุ่มนี้:\n" + "\n".join(mem_lines[-10:]) + "\n\n"
-            # ใช้ search ถ้าคำถามเกี่ยวกับข่าว/ข้อมูลปัจจุบัน
             news_keywords = ['ข่าว', 'วันนี้', 'ล่าสุด', 'ตอนนี้', 'ราคา', 'พยากรณ์', 'อากาศ', 'หุ้น', 'news', 'today', 'latest', 'price']
             use_search = any(kw in question.lower() for kw in news_keywords)
             full_prompt = (
@@ -303,8 +304,7 @@ def handle_image(event):
         last_images[room_id] = {"base64": image_base64, "sender": user_name}
         chat_history[room_id].append(f"{user_name}: [ส่งรูปภาพ]")
         desc = gemini_vision(image_base64, "อธิบายรูปภาพนี้สั้นๆ 1-2 ประโยค เป็นภาษาไทย")
-        reply_text = (f"{user_name} ส่งรูป: {desc}\n\n"
-                      f"(พิมพ์ AI วิเคราะห์รูป เพื่อดูรายละเอียดเพิ่มเติม)")
+        reply_text = f"{user_name} ส่งรูป: {desc}\n\n(พิมพ์ AI วิเคราะห์รูป เพื่อดูรายละเอียดเพิ่มเติม)"
         send_reply(api_client, event.reply_token, reply_text)
 
 
@@ -318,11 +318,9 @@ def handle_file(event):
         file_bytes = blob_api.get_message_content(event.message.id)
         chat_history[room_id].append(f"{user_name}: [ส่งไฟล์: {file_name}]")
 
-        # --- PDF ---
         if file_name.lower().endswith('.pdf'):
             if not HAS_PYPDF:
-                reply_text = (f"{user_name} ส่ง PDF: {file_name}\n"
-                             f"ยังไม่ได้ติดตั้ง pypdf ครับ กรุณาเพิ่ม pypdf ใน requirements.txt")
+                reply_text = f"ยังไม่ได้ติดตั้ง pypdf ครับ"
             else:
                 try:
                     reader = pypdf.PdfReader(io.BytesIO(file_bytes))
@@ -334,16 +332,13 @@ def handle_file(event):
                             text_content = text_content[:4000] + "...(ตัดทอน)"
                             break
                     if not text_content.strip():
-                        reply_text = (f"PDF จาก {user_name} ({file_name}, {pages} หน้า)\n"
-                                     f"ไม่สามารถดึงข้อความได้ครับ อาจเป็น PDF รูปภาพ")
+                        reply_text = f"PDF จาก {user_name} ({file_name}, {pages} หน้า)\nไม่สามารถดึงข้อความได้ครับ อาจเป็น PDF รูปภาพ"
                     else:
                         prompt = f"สรุปเนื้อหาของ PDF '{file_name}' ({pages} หน้า) เป็นภาษาไทย กระชับและได้ใจความ:\n\n{text_content}"
                         summary = gemini_text(prompt)
                         reply_text = f"PDF จาก {user_name} ({file_name}, {pages} หน้า):\n\n" + summary
                 except Exception as e:
                     reply_text = f"อ่าน PDF ไม่ได้ครับ: {str(e)}"
-
-        # --- Text files ---
         else:
             try:
                 text_content = file_bytes.decode('utf-8')
@@ -353,8 +348,7 @@ def handle_file(event):
                 summary = gemini_text(prompt)
                 reply_text = f"ไฟล์จาก {user_name} ({file_name}):\n\n" + summary
             except UnicodeDecodeError:
-                reply_text = (f"{user_name} ส่งไฟล์: {file_name}\n"
-                             f"ไฟล์ประเภทนี้ยังอ่านไม่ได้ครับ ลองส่งเป็น .txt หรือ .pdf นะครับ")
+                reply_text = f"{user_name} ส่งไฟล์: {file_name}\nไฟล์ประเภทนี้ยังอ่านไม่ได้ครับ ลองส่งเป็น .txt หรือ .pdf นะครับ"
 
         send_reply(api_client, event.reply_token, reply_text)
 
