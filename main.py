@@ -74,7 +74,7 @@ def gemini_text(prompt, use_search=False):
         if use_search:
             model = genai.GenerativeModel(
                 model_name='gemini-3-flash-preview',
-                tools='google_search_retrieval'
+                tools=[{'google_search': {}}]
             )
         else:
             model = genai.GenerativeModel('gemini-3-flash-preview')
